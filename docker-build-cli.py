@@ -3,7 +3,10 @@ import os
 import sys
 import click
 import yaml
+import json
 import time
+import re
+import base64
 from dotenv import load_dotenv
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -11,13 +14,60 @@ from kubernetes.client.rest import ApiException
 # Load environment variables from .env file
 load_dotenv()
 
-@click.command()
-@click.option('--image-name', required=True, help='Docker image name (e.g., username/repo:tag)')
-@click.option('--dockerhub-username', default=lambda: os.getenv('DOCKERHUB_USERNAME'), help='DockerHub username (or set DOCKERHUB_USERNAME env var)')
-@click.option('--dockerhub-token', default=lambda: os.getenv('DOCKERHUB_TOKEN'), help='DockerHub access token (or set DOCKERHUB_TOKEN env var)')
-@click.option('--context-path', default='.', help='Build context path (default: current directory)')
+def validate_image_name(image_name):
+    """Validate Docker image name format."""
+    if not image_name or not isinstance(image_name, str):
+        raise ValueError("Image name must be a non-empty string")
+    
+    # Check length limit
+    if len(image_name) > 255:
+        raise ValueError(f"Image name too long (max 255 chars): {len(image_name)}")
+    
+    # Check for dangerous characters and patterns
+    dangerous_chars = [';', '&', '|', '`', '$', '\n', '\r', '\t', '\x00', ' ', '@']
+    for char in dangerous_chars:
+        if char in image_name:
+            raise ValueError(f"Invalid character in image name: {char!r}")
+    
+    # Check for path traversal
+    if '..' in image_name or image_name.startswith('/') or '\\' in image_name:
+        raise ValueError(f"Invalid Docker image name format: {image_name}")
+    
+    # Check for invalid patterns
+    if image_name.startswith('-') or image_name.endswith('-'):
+        raise ValueError(f"Invalid Docker image name format: {image_name}")
+    
+    # Split image name and tag to validate separately
+    if ':' in image_name:
+        image_part, tag_part = image_name.rsplit(':', 1)
+    else:
+        image_part, tag_part = image_name, None
+    
+    # Check for uppercase in image part (Docker image names should be lowercase)
+    if image_part != image_part.lower():
+        raise ValueError(f"Docker image names must be lowercase: {image_name}")
+    
+    # Docker image name pattern: [registry[:port]/]namespace/repository[:tag]
+    # Image part must be lowercase, tag can have uppercase
+    image_pattern = r'^([a-z0-9][a-z0-9._-]*(?:\.[a-z0-9][a-z0-9._-]*)*(?::[0-9]+)?/)?[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$'
+    if not re.match(image_pattern, image_part):
+        raise ValueError(f"Invalid Docker image name format: {image_name}")
+    
+    # Validate tag if present
+    if tag_part:
+        tag_pattern = r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$'
+        if not re.match(tag_pattern, tag_part):
+            raise ValueError(f"Invalid Docker tag format: {tag_part}")
+
 def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path):
     """Build Docker image using BuildKit in Kubernetes and push to DockerHub."""
+    
+    # Validate image name format
+    try:
+        validate_image_name(image_name)
+    except ValueError as e:
+        click.echo(f"❌ {e}")
+        sys.exit(1)
     
     # Validate required credentials
     if not dockerhub_username:
@@ -72,11 +122,15 @@ def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path
             }
         }
         
+        # Properly encode credentials as base64
+        dockerconfig_json = json.dumps(dockerconfig)
+        dockerconfig_b64 = base64.b64encode(dockerconfig_json.encode('utf-8')).decode('utf-8')
+        
         secret = client.V1Secret(
             metadata=client.V1ObjectMeta(name=secret_name, namespace=namespace),
             type="kubernetes.io/dockerconfigjson",
             data={
-                ".dockerconfigjson": str.encode(yaml.dump(dockerconfig)).decode('utf-8').encode('base64').decode('utf-8').replace('\n', '')
+                ".dockerconfigjson": dockerconfig_b64
             }
         )
         
@@ -96,18 +150,41 @@ def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path
     try:
         # Read all files in context path
         files = {}
+        skipped_files = []
+        max_file_size = 1024 * 1024  # 1MB limit for individual files
+        
         for root, dirs, filenames in os.walk(context_path):
+            # Skip hidden directories and common build/cache directories
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['node_modules', '__pycache__', 'venv', '.git']]
+            
             for filename in filenames:
-                if filename.startswith('.'):
+                if filename.startswith('.') or filename.endswith(('.pyc', '.pyo')):
                     continue
+                    
                 file_path = os.path.join(root, filename)
                 rel_path = os.path.relpath(file_path, context_path)
+                
+                # Check file size
+                if os.path.getsize(file_path) > max_file_size:
+                    skipped_files.append(f"{rel_path} (too large: {os.path.getsize(file_path)} bytes)")
+                    continue
+                
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         files[rel_path] = f.read()
                 except UnicodeDecodeError:
-                    # Skip binary files
-                    continue
+                    # Handle binary files by base64 encoding them
+                    try:
+                        with open(file_path, 'rb') as f:
+                            binary_content = f.read()
+                            files[f"{rel_path}.b64"] = base64.b64encode(binary_content).decode('utf-8')
+                    except Exception as e:
+                        skipped_files.append(f"{rel_path} (read error: {str(e)})")
+                except Exception as e:
+                    skipped_files.append(f"{rel_path} (error: {str(e)})")
+        
+        if skipped_files:
+            click.echo(f"⚠️  Skipped {len(skipped_files)} files: {', '.join(skipped_files[:5])}{'...' if len(skipped_files) > 5 else ''}")
         
         configmap = client.V1ConfigMap(
             metadata=client.V1ObjectMeta(name=configmap_name, namespace=namespace),
@@ -152,7 +229,15 @@ def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path
                                     )
                                 ],
                                 security_context=client.V1SecurityContext(
-                                    privileged=True
+                                    run_as_non_root=True,
+                                    run_as_user=1000,
+                                    capabilities=client.V1Capabilities(
+                                        add=["SETUID", "SETGID"]
+                                    )
+                                ),
+                                resources=client.V1ResourceRequirements(
+                                    requests={"memory": "512Mi", "cpu": "500m"},
+                                    limits={"memory": "2Gi", "cpu": "2"}
                                 ),
                                 volume_mounts=[
                                     client.V1VolumeMount(
@@ -205,6 +290,15 @@ def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path
         click.echo(f"❌ Failed to create job: {e}")
         sys.exit(1)
     
+    # Clean up function for resources
+    def cleanup_resources():
+        """Clean up secrets and other sensitive resources."""
+        try:
+            v1.delete_namespaced_secret(secret_name, namespace)
+            click.echo("🗑️  Cleaned up DockerHub secret")
+        except ApiException:
+            pass  # Secret already deleted or doesn't exist
+    
     # Monitor job status
     click.echo("🔄 Monitoring build progress...")
     
@@ -217,6 +311,7 @@ def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path
             
             if job_status.status.succeeded:
                 click.echo(f"✅ Build completed successfully! Image {image_name} pushed to DockerHub")
+                cleanup_resources()
                 break
             elif job_status.status.failed:
                 click.echo("❌ Build failed!")
@@ -226,10 +321,13 @@ def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path
                     pod_name = pods.items[0].metadata.name
                     try:
                         logs = v1.read_namespaced_pod_log(pod_name, namespace)
+                        # Sanitize logs to remove potential sensitive information
+                        sanitized_logs = logs.replace(dockerhub_token, "***TOKEN***") if dockerhub_token in logs else logs
                         click.echo("Build logs:")
-                        click.echo(logs)
+                        click.echo(sanitized_logs)
                     except Exception as e:
                         click.echo(f"Failed to get logs: {e}")
+                cleanup_resources()
                 sys.exit(1)
             else:
                 click.echo("⏳ Build in progress...")
@@ -237,11 +335,22 @@ def build_and_push(image_name, dockerhub_username, dockerhub_token, context_path
                 
         except Exception as e:
             click.echo(f"❌ Error monitoring job: {e}")
+            cleanup_resources()
             sys.exit(1)
     
     if time.time() - start_time >= timeout:
         click.echo("❌ Build timed out!")
+        cleanup_resources()
         sys.exit(1)
 
+@click.command()
+@click.option('--image-name', required=True, help='Docker image name (e.g., username/repo:tag)')
+@click.option('--dockerhub-username', default=lambda: os.getenv('DOCKERHUB_USERNAME'), help='DockerHub username (or set DOCKERHUB_USERNAME env var)')
+@click.option('--dockerhub-token', default=lambda: os.getenv('DOCKERHUB_TOKEN'), help='DockerHub access token (or set DOCKERHUB_TOKEN env var)')
+@click.option('--context-path', default='.', help='Build context path (default: current directory)')
+def main(image_name, dockerhub_username, dockerhub_token, context_path):
+    """Main CLI entry point."""
+    build_and_push(image_name, dockerhub_username, dockerhub_token, context_path)
+
 if __name__ == '__main__':
-    build_and_push()
+    main()
