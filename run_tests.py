@@ -65,8 +65,18 @@ def main():
     
     # Run specific test categories
     test_results.append(run_command(
-        "python -m pytest test/test_docker_build_cli.py::TestImageNameValidation -v",
-        "Image Name Validation Tests"
+        "python -m pytest test/test_docker_build_cli.py::TestDockerfileValidation -v",
+        "Dockerfile Validation Tests"
+    ))
+    
+    test_results.append(run_command(
+        "python -m pytest test/test_docker_build_cli.py::TestYAMLTemplateLoading -v", 
+        "YAML Template Loading Tests"
+    ))
+    
+    test_results.append(run_command(
+        "python -m pytest test/test_docker_build_cli.py::TestKubectlOperations -v",
+        "kubectl Operations Tests"
     ))
     
     test_results.append(run_command(
@@ -75,8 +85,18 @@ def main():
     ))
     
     test_results.append(run_command(
+        "python -m pytest test/test_docker_build_cli.py::TestPodDeletionWaiting -v",
+        "Pod Deletion Tests"
+    ))
+    
+    test_results.append(run_command(
         "python -m pytest test/test_security.py::TestSecurityValidation -v",
         "Security Validation Tests"
+    ))
+    
+    test_results.append(run_command(
+        "python -m pytest test/test_security.py::TestCredentialSecurity -v",
+        "Credential Security Tests"
     ))
     
     # Summary

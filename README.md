@@ -6,9 +6,10 @@ A command-line tool that builds Docker images using BuildKit in a Kubernetes/Min
 
 - 🐳 Checks for Dockerfile presence in project root
 - ⚙️ Submits build jobs to Kubernetes cluster using BuildKit
-- 🚀 Automatically pushes built images to DockerHub
+- 🚀 Automatically pushes built multiplatform images (linux/amd64, linux/arm64) to DockerHub
 - 📊 Real-time build monitoring with progress updates
-- 🔄 Handles build context via Kubernetes ConfigMaps
+- 📁 Handles build context via kubectl cp (supports large files, no size limits)
+- 🗑️ Automatic cleanup of sensitive resources after completion
 
 ## Prerequisites
 
@@ -93,18 +94,19 @@ docker-build-cli.py --image-name myuser/python-app:v1.0
 - `--image-name` (required): Docker image name with tag (e.g., `username/repo:tag`)
 - `--dockerhub-username`: DockerHub username (or set `DOCKERHUB_USERNAME` env var)
 - `--dockerhub-token`: DockerHub access token (or set `DOCKERHUB_TOKEN` env var)
-- `--context-path`: Build context path (default: current directory)
 
 ## How It Works
 
-1. **Validation**: Checks for Dockerfile in the current directory (or specified context path)
-2. **Security Check**: Validates image name format and prevents injection attacks
-3. **Kubernetes Setup**: Creates namespace and required secrets/configmaps
-4. **Build Context**: Uploads project files to Kubernetes ConfigMap
-5. **Build Job**: Creates a Kubernetes Job using `moby/buildkit:latest`
-6. **Monitoring**: Tracks build progress and displays logs on failure
-7. **Push**: BuildKit automatically pushes successful builds to DockerHub
-8. **Cleanup**: Automatically removes secrets and resources after completion
+1. **Validation**: Checks for Dockerfile in the current directory
+2. **Kubernetes Setup**: Creates namespace and required secrets for DockerHub authentication
+3. **Pod Creation**: Creates a BuildKit pod with emptyDir volume for build context
+4. **Pod Management**: Automatically deletes and waits for cleanup of existing pods with the same name
+5. **Build Context Upload**: Uses `kubectl cp` to upload entire project directory (supports large files, binaries, node_modules, etc.)
+6. **Build Trigger**: Creates BUILD_READY signal file to start the build process
+7. **Multiplatform Build**: BuildKit builds for both linux/amd64 and linux/arm64 architectures
+8. **Push**: Automatically pushes successful multiplatform builds to DockerHub
+9. **Monitoring**: Tracks build progress with real-time logs
+10. **Cleanup**: Automatically removes sensitive DockerHub secrets after completion
 
 ## Workflow Example
 
@@ -119,12 +121,19 @@ ls Dockerfile
 docker-build-cli.py --image-name myuser/webapp:v1.0
 
 # The tool will:
-# ✅ Found Dockerfile in .
+# ✅ Found Dockerfile in current directory
 # ✅ Kubernetes config loaded  
-# ✅ Created namespace docker-builds
+# ✅ Using existing namespace docker-builds
 # ✅ Created DockerHub secret
-# ✅ Created build context ConfigMap
-# ✅ Created BuildKit build job
+# 🗑️  Deleting existing pod: build-myuser-webapp-v1-0
+# ✅ Pod deletion completed
+# ✅ Created BuildKit pod: build-myuser-webapp-v1-0
+# 🔄 Waiting for pod to be ready...
+# ✅ Pod is ready
+# 📁 Uploading build context...
+# ✅ Build context uploaded successfully
+# 🚀 Triggering build process...
+# ✅ Build triggered successfully
 # 🔄 Monitoring build progress...
 # ✅ Build completed successfully! Image myuser/webapp:v1.0 pushed to DockerHub
 # 🗑️  Cleaned up DockerHub secret
@@ -144,20 +153,32 @@ docker-build-cli.py --image-name myuser/webapp:v1.0
 
 2. **Dockerfile Not Found**
    ```
-   ❌ No Dockerfile found in .
+   ❌ No Dockerfile found in current directory
    ```
-   - Ensure you're in the project root directory
-   - Use `--context-path` to specify a different directory
+   - Ensure you're in the project root directory with a Dockerfile
 
-3. **Build Timeout**
+3. **Pod Deletion Timeout**
    ```
-   ❌ Build timed out!
+   ❌ Timeout waiting for pod deletion
    ```
-   - Large projects may exceed the 10-minute timeout
-   - Check cluster resources and build complexity
+   - Previous build pod may be stuck in terminating state
+   - Manually delete with: `kubectl delete pod -n docker-builds <pod-name> --force --grace-period=0`
 
-4. **Permission Denied**
-   - Ensure your Kubernetes user has permissions to create namespaces, jobs, secrets, and configmaps
+4. **kubectl cp Failed**
+   ```
+   ❌ Failed to upload build context
+   ```
+   - Ensure `kubectl` has access to your cluster
+   - Check if pod is running: `kubectl get pods -n docker-builds`
+   - Verify kubectl version compatibility
+
+5. **Build Context Too Large**
+   - The tool handles large files automatically
+   - For extremely large projects (>1GB), consider adding files to `.gitignore` to exclude from build context
+
+6. **Permission Denied**
+   - Ensure your Kubernetes user has permissions to create namespaces, pods, secrets
+   - Required RBAC permissions: pods, secrets, namespaces (create, read, update, delete)
 
 ### Getting Build Logs
 
@@ -170,6 +191,7 @@ If a build fails, the tool automatically displays the pod logs to help with debu
 ```
 cli-tool/
 ├── docker-build-cli.py    # Main CLI application
+├── buildkit-pod.yaml     # Kubernetes pod template for BuildKit
 ├── requirements.txt       # Python dependencies
 ├── .env.example          # Environment variables template
 ├── run_tests.py          # Test runner script
@@ -182,12 +204,20 @@ cli-tool/
 
 ### Dependencies
 
-- `click`: Command-line interface framework
+- `argparse`: Command-line interface (built-in)
 - `kubernetes`: Kubernetes Python client
 - `pyyaml`: YAML processing
 - `python-dotenv`: Environment variable loading
 - `pytest`: Testing framework
 - `pytest-mock`: Mock testing support
+
+### Key Features
+
+- **Multiplatform Builds**: Automatically builds for both linux/amd64 and linux/arm64 architectures
+- **kubectl cp Integration**: Handles large files, binaries, and complex project structures without size limits
+- **Pod Management**: Intelligent pod lifecycle management with proper deletion and cleanup
+- **Real-time Monitoring**: Live build progress tracking with detailed logs
+- **Secure Credential Handling**: Automatic cleanup of DockerHub secrets after build completion
 
 ### Testing
 
