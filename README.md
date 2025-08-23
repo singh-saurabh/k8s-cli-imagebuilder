@@ -1,5 +1,9 @@
 # Docker Build CLI
 
+[![Test Suite](https://github.com/singh-saurabh/k8s-cli-imagebuilder/actions/workflows/test.yml/badge.svg)](https://github.com/singh-saurabh/k8s-cli-imagebuilder/actions/workflows/test.yml)
+[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+[![Code Style](https://img.shields.io/badge/code%20style-flake8-blue.svg)](https://flake8.pycqa.org/)
+
 A command-line tool that builds Docker images using BuildKit in a Kubernetes/Minikube cluster and pushes them to DockerHub.
 
 ## Features
