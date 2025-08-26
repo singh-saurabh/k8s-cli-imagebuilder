@@ -99,6 +99,17 @@ def main():
         "Credential Security Tests"
     ))
     
+    # Run dockerignore tests
+    test_results.append(run_command(
+        "python -m unittest test.test_dockerignore -v",
+        "Dockerignore Unit Tests"
+    ))
+    
+    test_results.append(run_command(
+        "python -m pytest test/test_dockerignore.py::TestDockerignoreFunctionality -v",
+        "Dockerignore Functionality Tests"
+    ))
+    
     # Summary
     print(f"\n{'='*60}")
     print("TEST SUMMARY")

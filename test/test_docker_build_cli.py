@@ -27,6 +27,9 @@ upload_build_context = docker_build_cli.upload_build_context
 trigger_build = docker_build_cli.trigger_build
 load_pod_yaml_template = docker_build_cli.load_pod_yaml_template
 wait_for_pod_deletion = docker_build_cli.wait_for_pod_deletion
+load_dockerignore = docker_build_cli.load_dockerignore
+should_ignore_path = docker_build_cli.should_ignore_path
+create_filtered_build_context = docker_build_cli.create_filtered_build_context
 
 
 class TestDockerfileValidation(unittest.TestCase):

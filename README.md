@@ -13,6 +13,7 @@ A command-line tool that builds Docker images using BuildKit in a Kubernetes/Min
 - 🚀 Automatically pushes built multiplatform images (linux/amd64, linux/arm64) to DockerHub
 - 📊 Real-time build monitoring with progress updates
 - 📁 Handles build context via kubectl cp (supports large files, no size limits)
+- 🚫 Supports .dockerignore for efficient build context filtering
 - 🗑️ Automatic cleanup of sensitive resources after completion
 
 ## Prerequisites
@@ -105,12 +106,50 @@ docker-build-cli.py --image-name myuser/python-app:v1.0
 2. **Kubernetes Setup**: Creates namespace and required secrets for DockerHub authentication
 3. **Pod Creation**: Creates a BuildKit pod with emptyDir volume for build context
 4. **Pod Management**: Automatically deletes and waits for cleanup of existing pods with the same name
-5. **Build Context Upload**: Uses `kubectl cp` to upload entire project directory (supports large files, binaries, node_modules, etc.)
-6. **Build Trigger**: Creates BUILD_READY signal file to start the build process
-7. **Multiplatform Build**: BuildKit builds for both linux/amd64 and linux/arm64 architectures
-8. **Push**: Automatically pushes successful multiplatform builds to DockerHub
-9. **Monitoring**: Tracks build progress with real-time logs
-10. **Cleanup**: Automatically removes sensitive DockerHub secrets after completion
+5. **Build Context Filtering**: Parses .dockerignore file (if present) to exclude unnecessary files
+6. **Build Context Upload**: Uses `kubectl cp` to upload filtered project directory (supports large files, binaries, etc.)
+7. **Build Trigger**: Creates BUILD_READY signal file to start the build process
+8. **Multiplatform Build**: BuildKit builds for both linux/amd64 and linux/arm64 architectures
+9. **Push**: Automatically pushes successful multiplatform builds to DockerHub
+10. **Monitoring**: Tracks build progress with real-time logs
+11. **Cleanup**: Automatically removes sensitive DockerHub secrets after completion
+
+## .dockerignore Support
+
+The tool automatically detects and respects `.dockerignore` files to optimize build context transfer:
+
+```bash
+# Create a .dockerignore file to exclude unnecessary files
+cat > .dockerignore << EOF
+# Ignore development files
+node_modules/
+*.log
+*.tmp
+.git/
+.env.local
+
+# Ignore build artifacts
+dist/
+build/
+coverage/
+
+# Keep important files (use ! to negate)
+!important.log
+EOF
+```
+
+**Benefits:**
+- ⚡ **Faster uploads**: Only necessary files are transferred
+- 💾 **Reduced bandwidth**: Excludes large directories like `node_modules/`, `.git/`
+- 🔒 **Better security**: Prevents accidental inclusion of sensitive files
+- 📊 **Real-time feedback**: Shows count of copied vs ignored files
+
+When `.dockerignore` is present, you'll see:
+```bash
+✅ Loaded .dockerignore with 8 patterns
+📁 Creating filtered build context in /tmp/docker-build-context-xyz
+✅ Copied 25 files, ignored 1,247 files
+```
 
 ## Workflow Example
 
@@ -120,6 +159,9 @@ cd /Users/myuser/projects/my-web-app
 
 # Ensure Dockerfile exists
 ls Dockerfile
+
+# Optional: Create .dockerignore for faster builds
+echo -e "node_modules/\n*.log\n.git/" > .dockerignore
 
 # Run the build tool
 docker-build-cli.py --image-name myuser/webapp:v1.0
@@ -135,6 +177,8 @@ docker-build-cli.py --image-name myuser/webapp:v1.0
 # 🔄 Waiting for pod to be ready...
 # ✅ Pod is ready
 # 📁 Uploading build context...
+# ✅ Loaded .dockerignore with 3 patterns
+# ✅ Copied 45 files, ignored 832 files
 # ✅ Build context uploaded successfully
 # 🚀 Triggering build process...
 # ✅ Build triggered successfully
@@ -177,8 +221,9 @@ docker-build-cli.py --image-name myuser/webapp:v1.0
    - Verify kubectl version compatibility
 
 5. **Build Context Too Large**
-   - The tool handles large files automatically
-   - For extremely large projects (>1GB), consider adding files to `.gitignore` to exclude from build context
+   - Use `.dockerignore` to exclude unnecessary files and directories
+   - Common patterns: `node_modules/`, `.git/`, `*.log`, `dist/`, `build/`
+   - The tool shows file counts to help optimize your `.dockerignore`
 
 6. **Permission Denied**
    - Ensure your Kubernetes user has permissions to create namespaces, pods, secrets
@@ -202,6 +247,7 @@ cli-tool/
 ├── test/                 # Test directory
 │   ├── __init__.py
 │   ├── test_docker_build_cli.py  # Main functionality tests
+│   ├── test_dockerignore.py      # .dockerignore functionality tests
 │   └── test_security.py         # Security validation tests
 └── README.md            # This file
 ```
@@ -212,13 +258,15 @@ cli-tool/
 - `kubernetes`: Kubernetes Python client
 - `pyyaml`: YAML processing
 - `python-dotenv`: Environment variable loading
+- `pathspec`: .dockerignore pattern matching
 - `pytest`: Testing framework
 - `pytest-mock`: Mock testing support
 
 ### Key Features
 
 - **Multiplatform Builds**: Automatically builds for both linux/amd64 and linux/arm64 architectures
-- **kubectl cp Integration**: Handles large files, binaries, and complex project structures without size limits
+- **.dockerignore Support**: Intelligent build context filtering to reduce transfer time and size
+- **kubectl cp Integration**: Handles large files, binaries, and complex project structures
 - **Pod Management**: Intelligent pod lifecycle management with proper deletion and cleanup
 - **Real-time Monitoring**: Live build progress tracking with detailed logs
 - **Secure Credential Handling**: Automatic cleanup of DockerHub secrets after build completion

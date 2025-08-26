@@ -7,9 +7,13 @@ import json
 import time
 import base64
 import subprocess
+import tempfile
+import shutil
+from pathlib import Path
 from dotenv import load_dotenv
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+import pathspec
 
 # Load environment variables from .env file
 load_dotenv()
@@ -73,6 +77,84 @@ def validate_dockerfile():
         print("❌ No Dockerfile found in current directory")
         sys.exit(1)
     print("✅ Found Dockerfile in current directory")
+
+
+def load_dockerignore():
+    """Load .dockerignore patterns using pathspec."""
+    dockerignore_path = Path(".dockerignore")
+
+    if not dockerignore_path.exists():
+        print("ℹ️  No .dockerignore found, copying all files")
+        return None
+
+    try:
+        lines = dockerignore_path.read_text().splitlines()
+        spec = pathspec.PathSpec.from_lines('gitwildmatch', lines)
+        print(f"✅ Loaded .dockerignore with {len(lines)} patterns")
+        return spec
+    except Exception as e:
+        print(f"⚠️  Failed to parse .dockerignore: {e}")
+        print("ℹ️  Copying all files")
+        return None
+
+
+def should_ignore_path(spec, file_path):
+    """Check if a file path should be ignored based on .dockerignore."""
+    if spec is None:
+        return False
+
+    # Convert to relative path and normalize
+    rel_path = Path(file_path).relative_to(Path.cwd())
+    return spec.match_file(str(rel_path))
+
+
+def create_filtered_build_context(spec):
+    """Create a temporary directory with filtered files based on .dockerignore."""
+    temp_dir = tempfile.mkdtemp(prefix='docker-build-context-')
+    print(f"📁 Creating filtered build context in {temp_dir}")
+
+    copied_files = 0
+    ignored_files = 0
+
+    try:
+        # Walk through all files in current directory
+        for root, dirs, files in os.walk('.'):
+            # Convert root to relative path
+            root_path = Path(root).relative_to('.')
+
+            # Check if directory should be ignored
+            if root != '.' and should_ignore_path(spec, root):
+                ignored_files += len(files)
+                dirs.clear()  # Don't recurse into ignored directories
+                continue
+
+            # Create corresponding directory in temp location
+            dest_root = Path(temp_dir) / root_path
+            dest_root.mkdir(parents=True, exist_ok=True)
+
+            # Copy files that aren't ignored
+            for file in files:
+                src_file = Path(root) / file
+
+                if should_ignore_path(spec, src_file):
+                    ignored_files += 1
+                    continue
+
+                dest_file = dest_root / file
+                try:
+                    shutil.copy2(src_file, dest_file)
+                    copied_files += 1
+                except Exception as e:
+                    print(f"⚠️  Failed to copy {src_file}: {e}")
+
+        print(f"✅ Copied {copied_files} files, ignored {ignored_files} files")
+        return temp_dir
+
+    except Exception as e:
+        print(f"❌ Failed to create filtered build context: {e}")
+        # Clean up on error
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        sys.exit(1)
 
 
 def load_kubernetes_config():
@@ -181,11 +263,24 @@ def wait_for_pod_ready(v1, namespace, pod_name, timeout=120):
 
 
 def upload_build_context(namespace, pod_name):
-    """Upload build context using kubectl cp."""
+    """Upload build context using kubectl cp with .dockerignore filtering."""
     print("📁 Uploading build context...")
 
-    # Copy current directory to pod
-    kubectl_cp_cmd = f"kubectl cp . -n {namespace} {pod_name}:/build-context"
+    # Load .dockerignore patterns
+    dockerignore_spec = load_dockerignore()
+
+    # Determine source directory
+    if dockerignore_spec is None:
+        # No .dockerignore, use current directory
+        source_dir = "."
+        temp_dir = None
+    else:
+        # Create filtered build context
+        temp_dir = create_filtered_build_context(dockerignore_spec)
+        source_dir = temp_dir
+
+    # Copy source directory to pod
+    kubectl_cp_cmd = f"kubectl cp {source_dir} -n {namespace} {pod_name}:/build-context"
     print(f"🔄 Running: {kubectl_cp_cmd}")
 
     try:
@@ -194,11 +289,19 @@ def upload_build_context(namespace, pod_name):
             shell=True,
             capture_output=True,
             text=True)
+
+        # Clean up temporary directory
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
         if result.returncode != 0:
             print(f"❌ Failed to upload build context: {result.stderr}")
             sys.exit(1)
         print("✅ Build context uploaded successfully")
     except Exception as e:
+        # Clean up temporary directory on error
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
         print(f"❌ Error uploading build context: {e}")
         sys.exit(1)
 
